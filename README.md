@@ -28,6 +28,22 @@ git clone git@github.com:basketikun/chatgpt2api.git
 docker compose up -d
 ```
 
+### 存储后端配置
+
+支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
+
+- `json` - 本地 JSON 文件（默认）
+- `sqlite` - 本地 SQLite 数据库
+- `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
+- `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
+
+示例：使用 PostgreSQL
+```yaml
+environment:
+  - STORAGE_BACKEND=postgres
+  - DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
 ## 功能
 
 ### API 兼容能力

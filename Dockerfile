@@ -25,6 +25,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# 安装系统依赖
+# - git: Git 存储后端需要
+# - libpq-dev: PostgreSQL 客户端库
+# - gcc: 编译 psycopg2-binary 需要
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
@@ -36,6 +46,7 @@ COPY VERSION ./
 COPY api ./api
 COPY services ./services
 COPY utils ./utils
+COPY scripts ./scripts
 COPY --from=web-build /app/web/out ./web_dist
 
 EXPOSE 80

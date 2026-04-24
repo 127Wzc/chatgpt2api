@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from services.storage.base import StorageBackend
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -68,6 +70,7 @@ class ConfigStore:
         self.path = path
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
+        self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
@@ -135,6 +138,13 @@ class ConfigStore:
         self.data = next_data
         self._save()
         return self.get()
+
+    def get_storage_backend(self) -> StorageBackend:
+        """获取存储后端实例（单例）"""
+        if self._storage_backend is None:
+            from services.storage.factory import create_storage_backend
+            self._storage_backend = create_storage_backend(DATA_DIR)
+        return self._storage_backend
 
 
 config = ConfigStore(CONFIG_FILE)
