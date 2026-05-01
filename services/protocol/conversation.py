@@ -14,7 +14,7 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.openai_backend_api import OpenAIBackendAPI
-from utils.helper import IMAGE_MODELS
+from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
 
@@ -98,8 +98,30 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
         normalized.append({"role": "system", "content": system_text})
     if isinstance(messages, list):
         for message in messages:
-            if isinstance(message, dict):
-                normalized.append({"role": message.get("role", "user"), "content": message_text(message.get("content", ""))})
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            text = message_text(content)
+            images: list[tuple[bytes, str]] = []
+            if role == "user":
+                images.extend(extract_image_from_message_content(content))
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") != "image":
+                            continue
+                        data = part.get("data")
+                        if isinstance(data, (bytes, bytearray)):
+                            images.append((bytes(data), str(part.get("mime") or "image/png")))
+            if images:
+                parts: list[Any] = []
+                if text:
+                    parts.append({"type": "text", "text": text})
+                for data, mime in images:
+                    parts.append({"type": "image", "data": data, "mime": mime})
+                normalized.append({"role": role, "content": parts})
+            else:
+                normalized.append({"role": role, "content": text})
     return normalized
 
 

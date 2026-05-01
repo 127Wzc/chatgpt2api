@@ -198,13 +198,71 @@ class OpenAIBackendAPI:
         """把标准 chat messages 转成 web conversation 所需的 messages。"""
         conversation_messages = []
         for item in messages:
+            role = item.get("role", "user")
             content = item.get("content", "")
-            if not isinstance(content, str):
-                raise RuntimeError("only string message content is supported")
+            if isinstance(content, str):
+                conversation_messages.append({
+                    "id": new_uuid(),
+                    "author": {"role": role},
+                    "content": {"content_type": "text", "parts": [content]},
+                })
+                continue
+            if not isinstance(content, list):
+                raise RuntimeError("only string or list message content is supported")
+            text_parts: list[str] = []
+            image_inputs: list[tuple[bytes, str]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "")
+                if part_type == "text":
+                    text_parts.append(str(part.get("text") or ""))
+                elif part_type == "image":
+                    data = part.get("data")
+                    mime = str(part.get("mime") or "image/png")
+                    if isinstance(data, (bytes, bytearray)):
+                        image_inputs.append((bytes(data), mime))
+            if not image_inputs:
+                conversation_messages.append({
+                    "id": new_uuid(),
+                    "author": {"role": role},
+                    "content": {"content_type": "text", "parts": ["".join(text_parts)]},
+                })
+                continue
+            if not self.access_token:
+                raise RuntimeError("authenticated upstream account required for image input")
+            uploaded: list[Dict[str, Any]] = []
+            for idx, (data, mime) in enumerate(image_inputs, start=1):
+                ext_part = mime.split("/", 1)[1].split("+")[0] if "/" in mime else "png"
+                extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
+                b64 = base64.b64encode(data).decode("ascii")
+                uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+            parts: list[Any] = []
+            for ref in uploaded:
+                parts.append({
+                    "content_type": "image_asset_pointer",
+                    "asset_pointer": f"file-service://{ref['file_id']}",
+                    "width": ref["width"],
+                    "height": ref["height"],
+                    "size_bytes": ref["file_size"],
+                })
+            text = "".join(text_parts)
+            if text:
+                parts.append(text)
             conversation_messages.append({
                 "id": new_uuid(),
-                "author": {"role": item.get("role", "user")},
-                "content": {"content_type": "text", "parts": [content]},
+                "author": {"role": role},
+                "content": {"content_type": "multimodal_text", "parts": parts},
+                "metadata": {
+                    "attachments": [{
+                        "id": ref["file_id"],
+                        "mimeType": ref["mime_type"],
+                        "name": ref["file_name"],
+                        "size": ref["file_size"],
+                        "width": ref["width"],
+                        "height": ref["height"],
+                    } for ref in uploaded],
+                },
             })
         return conversation_messages
 
