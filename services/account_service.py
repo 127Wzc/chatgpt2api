@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import hashlib
 import json
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any
 from datetime import datetime
 
@@ -36,6 +36,7 @@ class AccountService:
     def __init__(self, storage_backend: StorageBackend):
         self.storage = storage_backend
         self._lock = Lock()
+        self._image_slot_condition = Condition(self._lock)
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
@@ -225,47 +226,53 @@ class AccountService:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
 
-    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
-        max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
             for item in self._accounts
             if self._is_image_account_available(item)
                and (token := self._clean_token(item.get("access_token")))
                and token not in excluded
-               and int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
-    def _pick_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
-        with self._lock:
-            tokens = self._list_available_candidate_tokens(excluded_tokens)
-            if not tokens:
-                raise RuntimeError("no available image quota")
-            access_token = tokens[self._index % len(tokens)]
-            self._index += 1
-            return access_token
+    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        return [
+            token
+            for token in self._list_ready_candidate_tokens(excluded_tokens)
+            if int(self._image_inflight.get(token, 0)) < max_concurrency
+        ]
 
     def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
-        with self._lock:
-            tokens = self._list_available_candidate_tokens(excluded_tokens)
-            if not tokens:
-                raise RuntimeError("no available image quota")
-            access_token = tokens[self._index % len(tokens)]
-            self._index += 1
-            self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
-            return access_token
+        with self._image_slot_condition:
+            while True:
+                ready_tokens = self._list_ready_candidate_tokens(excluded_tokens)
+                if not ready_tokens:
+                    raise RuntimeError("no available image quota")
+                tokens = [
+                    token
+                    for token in ready_tokens
+                    if int(self._image_inflight.get(token, 0)) < max(1, int(config.image_account_concurrency or 1))
+                ]
+                if tokens:
+                    access_token = tokens[self._index % len(tokens)]
+                    self._index += 1
+                    self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                    return access_token
+                self._image_slot_condition.wait(timeout=1.0)
 
     def release_image_slot(self, access_token: str) -> None:
         access_token = self._clean_token(access_token)
         if not access_token:
             return
-        with self._lock:
+        with self._image_slot_condition:
             current_inflight = int(self._image_inflight.get(access_token, 0))
             if current_inflight <= 1:
                 self._image_inflight.pop(access_token, None)
             else:
                 self._image_inflight[access_token] = current_inflight - 1
+            self._image_slot_condition.notify_all()
 
     def refresh_account_state(self, access_token: str) -> dict | None:
         token_ref = anonymize_token(access_token)
