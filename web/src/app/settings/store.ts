@@ -38,14 +38,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
+    global_system_prompt: String(config.global_system_prompt || ""),
     sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
-    ai_review: {
-      enabled: Boolean(config.ai_review?.enabled),
-      base_url: String(config.ai_review?.base_url || ""),
-      api_key: String(config.ai_review?.api_key || ""),
-      model: String(config.ai_review?.model || ""),
-      prompt: String(config.ai_review?.prompt || ""),
-    },
   };
 }
 
@@ -108,8 +102,8 @@ type SettingsStore = {
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
+  setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
-  setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -215,14 +209,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
+        global_system_prompt: String(config.global_system_prompt || "").trim(),
         sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
-        ai_review: {
-          enabled: Boolean(config.ai_review?.enabled),
-          base_url: String(config.ai_review?.base_url || "").trim(),
-          api_key: String(config.ai_review?.api_key || "").trim(),
-          model: String(config.ai_review?.model || "").trim(),
-          prompt: String(config.ai_review?.prompt || "").trim(),
-        },
       });
       set({
         config: normalizeConfig(data.config),
@@ -303,12 +291,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     });
   },
 
-  setSensitiveWordsText: (value) => {
-    set((state) => state.config ? { config: { ...state.config, sensitive_words: value.split("\n") } } : {});
+  setGlobalSystemPrompt: (value) => {
+    set((state) => state.config ? { config: { ...state.config, global_system_prompt: value } } : {});
   },
 
-  setAIReviewField: (key, value) => {
-    set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+  setSensitiveWordsText: (value) => {
+    set((state) => state.config ? { config: { ...state.config, sensitive_words: value.split("\n") } } : {});
   },
 
   loadRegister: async (silent = false) => {

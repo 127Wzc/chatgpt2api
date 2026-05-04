@@ -28,8 +28,8 @@ export function ConfigCard() {
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
+  const setGlobalSystemPrompt = useSettingsStore((state) => state.setGlobalSystemPrompt);
   const setSensitiveWordsText = useSettingsStore((state) => state.setSensitiveWordsText);
-  const setAIReviewField = useSettingsStore((state) => state.setAIReviewField);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -182,6 +182,16 @@ export function ConfigCard() {
             </div>
           </div>
           <div className="space-y-2 md:col-span-2">
+            <label className="text-sm text-stone-700">全局附加指令</label>
+            <Textarea
+              value={String(config?.global_system_prompt || "")}
+              onChange={(event) => setGlobalSystemPrompt(event.target.value)}
+              placeholder="例如：先判断用户提示词是否合规；遇到违法、色情、暴力、仇恨等请求时拒绝回答。"
+              className="min-h-28 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
+            />
+            <p className="text-xs text-stone-500">每次请求都会作为 system 消息注入，可用于审核用户提示词、避免违规内容、统一约束模型行为或固定角色设定。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
             <label className="text-sm text-stone-700">敏感词</label>
             <Textarea
               value={(config?.sensitive_words || []).join("\n")}
@@ -190,33 +200,6 @@ export function ConfigCard() {
               className="min-h-28 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none"
             />
             <p className="text-xs text-stone-500">只要用户请求包含任意敏感词，就直接返回拒绝。</p>
-          </div>
-          <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-3 md:col-span-2">
-            <label className="flex items-center gap-3 text-sm text-stone-700">
-              <Checkbox
-                checked={Boolean(config?.ai_review?.enabled)}
-                onCheckedChange={(checked) => setAIReviewField("enabled", Boolean(checked))}
-              />
-              启用 AI 审核
-            </label>
-            <div className="grid gap-4 md:grid-cols-3">
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">Base URL</label>
-                <Input value={String(config?.ai_review?.base_url || "")} onChange={(event) => setAIReviewField("base_url", event.target.value)} placeholder="https://api.openai.com" className="h-10 rounded-xl border-stone-200 bg-white" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">API Key</label>
-                <Input value={String(config?.ai_review?.api_key || "")} onChange={(event) => setAIReviewField("api_key", event.target.value)} placeholder="sk-..." className="h-10 rounded-xl border-stone-200 bg-white" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">Model</label>
-                <Input value={String(config?.ai_review?.model || "")} onChange={(event) => setAIReviewField("model", event.target.value)} placeholder="gpt-4.1-mini" className="h-10 rounded-xl border-stone-200 bg-white" />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm text-stone-700">审核提示词</label>
-              <Textarea value={String(config?.ai_review?.prompt || "")} onChange={(event) => setAIReviewField("prompt", event.target.value)} placeholder="判断用户请求是否允许。只回答 ALLOW 或 REJECT。" className="min-h-24 rounded-xl border-stone-200 bg-white text-xs shadow-none" />
-            </div>
           </div>
         </div>
 

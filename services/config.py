@@ -145,9 +145,8 @@ class ConfigStore:
         return [word for item in words if (word := str(item or "").strip())] if isinstance(words, list) else []
 
     @property
-    def ai_review(self) -> dict[str, object]:
-        value = self.data.get("ai_review")
-        return value if isinstance(value, dict) else {}
+    def global_system_prompt(self) -> str:
+        return str(self.data.get("global_system_prompt") or "").strip()
 
     @property
     def images_dir(self) -> Path:
@@ -200,7 +199,7 @@ class ConfigStore:
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
         data["sensitive_words"] = self.sensitive_words
-        data["ai_review"] = self.ai_review
+        data["global_system_prompt"] = self.global_system_prompt
         data.pop("auth-key", None)
         return data
 
