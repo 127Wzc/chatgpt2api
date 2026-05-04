@@ -34,6 +34,11 @@ def _sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _is_backup_object(key: object) -> bool:
+    name = _clean(key).rsplit("/", 1)[-1]
+    return name.startswith("backup-") and (name.endswith(".tar.gz") or name.endswith(".tar.gz.enc"))
+
+
 def _hmac_sha256(key: bytes, message: str) -> bytes:
     return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
 
@@ -540,7 +545,7 @@ class BackupService:
     def _apply_rotation(self, client: CloudflareR2Client, keep: int) -> None:
         if keep <= 0:
             return
-        items = client.list_objects()
+        items = [item for item in client.list_objects() if _is_backup_object(item.get("key"))]
         if len(items) <= keep:
             return
         for item in items[keep:]:

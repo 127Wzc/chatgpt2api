@@ -82,7 +82,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       bucket: String(backup.bucket || ""),
       prefix: String(backup.prefix || "backups"),
       interval_minutes: Number(backup.interval_minutes || 360),
-      rotation_keep: Number(backup.rotation_keep || 10),
+      rotation_keep: Number(backup.rotation_keep ?? 10),
       encrypt: Boolean(backup.encrypt),
       passphrase: String(backup.passphrase || ""),
       include: {
