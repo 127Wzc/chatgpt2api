@@ -7,6 +7,7 @@ import unittest
 
 from fastapi.responses import StreamingResponse
 
+from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput, stream_image_outputs
 from services.protocol.openai_v1_chat_complete import stream_image_chat_completion
 from services.log_service import LoggedCall
 from utils.helper import sse_json_stream
@@ -109,6 +110,44 @@ class LoggedCallStreamingTests(unittest.TestCase):
         self.assertEqual(delta.get("role"), "assistant")
         self.assertEqual(delta.get("content"), "")
         self.assertFalse(consumed)
+
+    def test_image_chat_stream_suppresses_upstream_progress_text(self):
+        def outputs():
+            yield ImageOutput(
+                kind="progress",
+                model="gpt-image-2",
+                index=1,
+                total=1,
+                text='{"prompt":"rewritten prompt"}',
+                upstream_event_type="conversation.delta",
+            )
+            yield ImageOutput(
+                kind="result",
+                model="gpt-image-2",
+                index=1,
+                total=1,
+                data=[{"b64_json": "aGVsbG8="}],
+            )
+
+        stream = stream_image_chat_completion(outputs(), "gpt-image-2")
+        next(stream)
+        result_chunk = next(stream)
+
+        content = ((((result_chunk.get("choices") or [{}])[0]).get("delta") or {}).get("content") or "")
+        self.assertNotIn("rewritten prompt", content)
+        self.assertIn("data:image/png;base64,aGVsbG8=", content)
+
+    def test_image_stream_raises_when_upstream_returns_no_image_result(self):
+        class Backend:
+            def stream_conversation(self, **kwargs):
+                yield '{"p":"/message/content/parts/0","o":"append","v":"{\\"prompt\\":\\"rewritten prompt\\"}","conversation_id":"conv_test"}'
+                yield "[DONE]"
+
+            def resolve_conversation_image_urls(self, conversation_id, file_ids, sediment_ids):
+                return []
+
+        with self.assertRaisesRegex(ImageGenerationError, "did not return an image result"):
+            list(stream_image_outputs(Backend(), ConversationRequest(prompt="test", model="gpt-image-2")))
 
 
 if __name__ == "__main__":

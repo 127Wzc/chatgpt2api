@@ -582,8 +582,7 @@ def stream_image_outputs(
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
 
-    if message:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+    raise ImageGenerationError("upstream image generation did not return an image result")
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:

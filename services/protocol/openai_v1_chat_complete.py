@@ -142,17 +142,15 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
 def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_text = ""
     yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     for output in image_outputs:
         content = ""
         if output.kind == "progress":
-            content = output.text
-            sent_text += content
+            continue
         elif output.kind == "result":
             content = build_chat_image_markdown_content({"data": output.data})
         elif output.kind == "message":
-            content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
+            content = output.text
         if not content:
             continue
         yield completion_chunk(model, {"content": content}, None, completion_id, created)
