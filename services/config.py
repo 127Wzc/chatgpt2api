@@ -188,6 +188,14 @@ class ConfigStore:
             return 120
 
     @property
+    def sse_heartbeat_interval_secs(self) -> int:
+        try:
+            value = os.getenv("CHATGPT2API_SSE_HEARTBEAT_INTERVAL_SECS") or self.data.get("sse_heartbeat_interval_secs", 15)
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 15
+
+    @property
     def image_account_concurrency(self) -> int:
         try:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
@@ -277,6 +285,7 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
+        data["sse_heartbeat_interval_secs"] = self.sse_heartbeat_interval_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts

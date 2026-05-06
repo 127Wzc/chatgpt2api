@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from services.config import DATA_DIR
+from services.config import DATA_DIR, config
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -195,7 +195,7 @@ class LoggedCall:
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
         return StreamingResponse(
-            sender(self.stream(result)),
+            sender(self.stream(result), heartbeat_interval=config.sse_heartbeat_interval_secs),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

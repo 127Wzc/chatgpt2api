@@ -16,7 +16,6 @@ from utils.log import logger
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 _HEARTBEAT = object()
-_PROGRESS_TEXT_LIMIT = 240
 
 
 def new_uuid() -> str:
@@ -85,77 +84,70 @@ def iter_with_heartbeat(items, interval: float = 15.0) -> Iterator[object]:
         stop_event.set()
 
 
-def _short_progress_text(value: object) -> str:
-    text = " ".join(str(value or "").split())
-    if not text or "data:image/" in text:
-        return ""
-    if len(text) <= _PROGRESS_TEXT_LIMIT:
-        return text
-    return text[: _PROGRESS_TEXT_LIMIT - 1].rstrip() + "…"
-
-
-def _stream_progress(item: object) -> dict[str, object]:
-    if not isinstance(item, dict):
-        return {}
-
-    progress: dict[str, object] = {}
-    object_type = str(item.get("object") or "").strip()
-    event_type = str(item.get("type") or "").strip()
-    if object_type:
-        progress["object"] = object_type
-    if event_type:
-        progress["type"] = event_type
-
-    if "index" in item:
-        progress["index"] = item.get("index")
-    if "total" in item:
-        progress["total"] = item.get("total")
-
-    upstream_event_type = str(item.get("upstream_event_type") or "").strip()
-    if upstream_event_type:
-        progress["upstream_event_type"] = upstream_event_type
-
-    progress_text = _short_progress_text(item.get("progress_text"))
-    message = _short_progress_text(item.get("message"))
-    if progress_text:
-        progress["progress_text"] = progress_text
-    elif message:
-        progress["message"] = message
-
-    choices = item.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        delta = choices[0].get("delta")
-        finish_reason = choices[0].get("finish_reason")
-        if isinstance(delta, dict):
-            content = _short_progress_text(delta.get("content"))
-            if content:
-                progress["progress_text"] = content
-        if finish_reason:
-            progress["finish_reason"] = finish_reason
-
-    return {key: value for key, value in progress.items() if value not in ("", None)}
-
-
-def _heartbeat_comment(started_at: float, last_progress: dict[str, object]) -> str:
-    payload: dict[str, object] = {
+def _heartbeat_payload(started_at: float, heartbeat_index: int) -> dict[str, object]:
+    return {
         "event": "heartbeat",
+        "heartbeat_index": heartbeat_index,
         "elapsed_seconds": round(time.time() - started_at, 2),
     }
-    if last_progress:
-        payload["last_progress"] = last_progress
+
+
+def _heartbeat_comment(started_at: float, heartbeat_index: int) -> str:
+    payload = _heartbeat_payload(started_at, heartbeat_index)
     return f": ping {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _heartbeat_data_item(last_item: object, started_at: float, heartbeat_index: int) -> dict[str, object] | None:
+    if not isinstance(last_item, dict):
+        return None
+
+    heartbeat = _heartbeat_payload(started_at, heartbeat_index)
+    object_type = str(last_item.get("object") or "").strip()
+    if object_type == "chat.completion.chunk":
+        choices = last_item.get("choices")
+        first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        return {
+            "id": last_item.get("id"),
+            "object": "chat.completion.chunk",
+            "created": int(last_item.get("created") or time.time()),
+            "model": last_item.get("model"),
+            "choices": [{
+                "index": first_choice.get("index", 0),
+                "delta": {"content": ""},
+                "finish_reason": None,
+            }],
+            "x_heartbeat": heartbeat,
+        }
+
+    if object_type.startswith("image.generation."):
+        return {
+            "object": "image.generation.heartbeat",
+            "created": int(time.time()),
+            "model": last_item.get("model"),
+            "index": last_item.get("index"),
+            "total": last_item.get("total"),
+            "data": [],
+            "x_heartbeat": heartbeat,
+        }
+
+    return None
 
 
 def sse_json_stream(items, heartbeat_interval: float = 15.0) -> Iterator[str]:
     started_at = time.time()
-    last_progress: dict[str, object] = {}
+    heartbeat_index = 0
+    last_item: object = None
     yield ": stream-open\n\n"
     try:
         for item in iter_with_heartbeat(items, heartbeat_interval):
             if item is _HEARTBEAT:
-                yield _heartbeat_comment(started_at, last_progress)
+                heartbeat_index += 1
+                heartbeat_item = _heartbeat_data_item(last_item, started_at, heartbeat_index)
+                if heartbeat_item is not None:
+                    yield f"data: {json.dumps(heartbeat_item, ensure_ascii=False)}\n\n"
+                yield _heartbeat_comment(started_at, heartbeat_index)
                 continue
-            last_progress = _stream_progress(item) or last_progress
+            last_item = item
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
     except Exception as exc:
         logger.warning({
@@ -172,14 +164,14 @@ def sse_json_stream(items, heartbeat_interval: float = 15.0) -> Iterator[str]:
 
 def anthropic_sse_stream(items, heartbeat_interval: float = 15.0) -> Iterator[str]:
     started_at = time.time()
-    last_progress: dict[str, object] = {}
+    heartbeat_index = 0
     yield ": stream-open\n\n"
     try:
         for item in iter_with_heartbeat(items, heartbeat_interval):
             if item is _HEARTBEAT:
-                yield _heartbeat_comment(started_at, last_progress)
+                heartbeat_index += 1
+                yield _heartbeat_comment(started_at, heartbeat_index)
                 continue
-            last_progress = _stream_progress(item) or last_progress
             event = str(item.get("type") or "message_delta") if isinstance(item, dict) else "message_delta"
             yield f"event: {event}\n"
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"

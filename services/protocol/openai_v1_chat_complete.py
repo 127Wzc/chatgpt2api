@@ -61,16 +61,10 @@ def completion_response(
 def stream_text_chat_completion(backend, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
+    yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     request = ConversationRequest(model=model, messages=messages)
     for delta_text in stream_text_deltas(backend, request):
-        if not sent_role:
-            sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
-        else:
-            yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
-    if not sent_role:
-        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+        yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
@@ -148,8 +142,8 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
 def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
     sent_text = ""
+    yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     for output in image_outputs:
         content = ""
         if output.kind == "progress":
@@ -161,13 +155,7 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
             content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
         if not content:
             continue
-        if not sent_role:
-            sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
-        else:
-            yield completion_chunk(model, {"content": content}, None, completion_id, created)
-    if not sent_role:
-        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+        yield completion_chunk(model, {"content": content}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
