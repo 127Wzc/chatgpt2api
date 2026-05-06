@@ -1,7 +1,9 @@
 import base64
 import hashlib
 import json
+import queue
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +15,8 @@ from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+_HEARTBEAT = object()
+_PROGRESS_TEXT_LIMIT = 240
 
 
 def new_uuid() -> str:
@@ -38,10 +42,120 @@ def ensure_ok(response: requests.Response, context: str) -> None:
     raise RuntimeError(f"{context} failed: status={response.status_code}, body={body}")
 
 
-def sse_json_stream(items) -> Iterator[str]:
+def iter_with_heartbeat(items, interval: float = 15.0) -> Iterator[object]:
+    item_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
+
+    def worker() -> None:
+        try:
+            for item in items:
+                if stop_event.is_set():
+                    break
+                while not stop_event.is_set():
+                    try:
+                        item_queue.put(("item", item), timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception as exc:
+            if not stop_event.is_set():
+                item_queue.put(("error", exc))
+        finally:
+            if not stop_event.is_set():
+                item_queue.put(("done", None))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        while True:
+            try:
+                kind, value = item_queue.get(timeout=interval)
+            except queue.Empty:
+                yield _HEARTBEAT
+                continue
+            if kind == "item":
+                yield value
+                continue
+            if kind == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise RuntimeError(str(value))
+            return
+    finally:
+        stop_event.set()
+
+
+def _short_progress_text(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    if not text or "data:image/" in text:
+        return ""
+    if len(text) <= _PROGRESS_TEXT_LIMIT:
+        return text
+    return text[: _PROGRESS_TEXT_LIMIT - 1].rstrip() + "…"
+
+
+def _stream_progress(item: object) -> dict[str, object]:
+    if not isinstance(item, dict):
+        return {}
+
+    progress: dict[str, object] = {}
+    object_type = str(item.get("object") or "").strip()
+    event_type = str(item.get("type") or "").strip()
+    if object_type:
+        progress["object"] = object_type
+    if event_type:
+        progress["type"] = event_type
+
+    if "index" in item:
+        progress["index"] = item.get("index")
+    if "total" in item:
+        progress["total"] = item.get("total")
+
+    upstream_event_type = str(item.get("upstream_event_type") or "").strip()
+    if upstream_event_type:
+        progress["upstream_event_type"] = upstream_event_type
+
+    progress_text = _short_progress_text(item.get("progress_text"))
+    message = _short_progress_text(item.get("message"))
+    if progress_text:
+        progress["progress_text"] = progress_text
+    elif message:
+        progress["message"] = message
+
+    choices = item.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        delta = choices[0].get("delta")
+        finish_reason = choices[0].get("finish_reason")
+        if isinstance(delta, dict):
+            content = _short_progress_text(delta.get("content"))
+            if content:
+                progress["progress_text"] = content
+        if finish_reason:
+            progress["finish_reason"] = finish_reason
+
+    return {key: value for key, value in progress.items() if value not in ("", None)}
+
+
+def _heartbeat_comment(started_at: float, last_progress: dict[str, object]) -> str:
+    payload: dict[str, object] = {
+        "event": "heartbeat",
+        "elapsed_seconds": round(time.time() - started_at, 2),
+    }
+    if last_progress:
+        payload["last_progress"] = last_progress
+    return f": ping {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def sse_json_stream(items, heartbeat_interval: float = 15.0) -> Iterator[str]:
+    started_at = time.time()
+    last_progress: dict[str, object] = {}
     yield ": stream-open\n\n"
     try:
-        for item in items:
+        for item in iter_with_heartbeat(items, heartbeat_interval):
+            if item is _HEARTBEAT:
+                yield _heartbeat_comment(started_at, last_progress)
+                continue
+            last_progress = _stream_progress(item) or last_progress
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
     except Exception as exc:
         logger.warning({
@@ -56,9 +170,16 @@ def sse_json_stream(items) -> Iterator[str]:
     yield "data: [DONE]\n\n"
 
 
-def anthropic_sse_stream(items) -> Iterator[str]:
+def anthropic_sse_stream(items, heartbeat_interval: float = 15.0) -> Iterator[str]:
+    started_at = time.time()
+    last_progress: dict[str, object] = {}
+    yield ": stream-open\n\n"
     try:
-        for item in items:
+        for item in iter_with_heartbeat(items, heartbeat_interval):
+            if item is _HEARTBEAT:
+                yield _heartbeat_comment(started_at, last_progress)
+                continue
+            last_progress = _stream_progress(item) or last_progress
             event = str(item.get("type") or "message_delta") if isinstance(item, dict) else "message_delta"
             yield f"event: {event}\n"
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"

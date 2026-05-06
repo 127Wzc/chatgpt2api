@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -166,13 +165,6 @@ def _image_error_response(exc: Exception) -> JSONResponse:
     )
 
 
-def _next_item(items):
-    try:
-        return True, next(items)
-    except StopIteration:
-        return False, None
-
-
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -202,21 +194,14 @@ class LoggedCall:
             return result
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
-        try:
-            has_first, first = await run_in_threadpool(_next_item, result)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc))
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
-        if not has_first:
-            self.log("流式调用结束")
-            return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+        return StreamingResponse(
+            sender(self.stream(result)),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     def stream(self, items):
         urls: list[str] = []
