@@ -44,12 +44,20 @@ class ImageGenerationError(Exception):
     def to_openai_error(self) -> dict[str, Any]:
         return {
             "error": {
-                "message": str(self),
+                "message": public_image_error_message(str(self)),
                 "type": self.error_type,
                 "param": self.param,
                 "code": self.code,
             }
         }
+
+
+def public_image_error_message(message: str) -> str:
+    text = str(message or "").strip()
+    lower = text.lower()
+    if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
+        return "The image generation request failed. Please try again later."
+    return text or "The image generation request failed. Please try again later."
 
 
 def is_token_invalid_error(message: str) -> bool:
@@ -238,6 +246,7 @@ class ConversationRequest:
 @dataclass
 class ConversationState:
     text: str = ""
+    raw_text: str = ""
     conversation_id: str = ""
     file_ids: list[str] = field(default_factory=list)
     sediment_ids: list[str] = field(default_factory=list)
@@ -304,7 +313,27 @@ def strip_history(text: str, history_text: str = "") -> str:
     return text
 
 
-def assistant_text(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
+def sanitize_output_text(text: str) -> str:
+    text = str(text or "")
+
+    def replace_url(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        url = match.group(2).strip()
+        if label and url.startswith(("http://", "https://")):
+            return f"{label} ({url})"
+        return label or url
+
+    # ChatGPT web sometimes returns rich annotation markers using private-use
+    # characters. API clients cannot render those, so convert links and drop
+    # citations before emitting OpenAI-compatible text.
+    text = re.sub(r"\ue200url\ue202([^\ue202\ue201]*)\ue202([^\ue201]*)\ue201", replace_url, text)
+    text = re.sub(r"\ue200cite\ue202[^\ue201]*\ue201", "", text)
+    text = re.sub(r"\ue200[^\ue201]*\ue201", "", text)
+    text = re.sub(r"\ue200[^\ue201]*$", "", text)
+    return text
+
+
+def assistant_raw_text(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
     for candidate in (event, event.get("v")):
         if not isinstance(candidate, dict):
             continue
@@ -318,6 +347,10 @@ def assistant_text(event: dict[str, Any], current_text: str = "", history_text: 
         if text:
             return strip_history(text, history_text)
     return apply_text_patch(event, current_text, history_text)
+
+
+def assistant_text(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
+    return sanitize_output_text(assistant_raw_text(event, current_text, history_text))
 
 
 def event_assistant_text(event: dict[str, Any], history_text: str = "") -> str:
@@ -478,9 +511,12 @@ def iter_conversation_payloads(payloads: Iterator[str], history_text: str = "",
         update_conversation_state(state, payload, event)
         if history_index < len(history_messages) and event_assistant_text(event, history_text) == history_messages[history_index]:
             history_index += 1
+            state.raw_text = ""
             state.text = ""
             continue
-        next_text = assistant_text(event, state.text, history_text)
+        next_raw_text = assistant_raw_text(event, state.raw_text, history_text)
+        next_text = sanitize_output_text(next_raw_text)
+        state.raw_text = next_raw_text
         if next_text != state.text:
             delta = next_text[len(state.text):] if next_text.startswith(state.text) else next_text
             state.text = next_text
@@ -650,113 +686,30 @@ def _codex_response_images(value: Any) -> list[str]:
     return []
 
 
-def _codex_response_error(value: Any) -> tuple[str, str]:
-    if not isinstance(value, dict):
-        return "", ""
-    error = value.get("error")
-    if not isinstance(error, dict):
-        response = value.get("response")
-        error = response.get("error") if isinstance(response, dict) and response.get("status") == "failed" else None
-    if not isinstance(error, dict):
-        return "", ""
-    message = str(error.get("message") or "").strip()
-    code = str(error.get("code") or error.get("type") or "server_error").strip()
-    return message or "Codex responses failed upstream.", code
-
-
 def stream_codex_image_outputs(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
         index: int = 1,
         total: int = 1,
 ) -> Iterator[ImageOutput]:
-    text_parts: list[str] = []
-    event_count = 0
-    event_types: dict[str, int] = {}
-    for event in backend.iter_codex_image_response_events(
-            prompt=request.prompt,
-            images=request.images or [],
-            size=request.size,
-            quality=request.quality,
-    ):
-        event_type = str(event.get("type") or "")
-        event_count += 1
-        event_types[event_type or "<missing>"] = event_types.get(event_type or "<missing>", 0) + 1
-        upstream_error, upstream_code = _codex_response_error(event)
-        if upstream_error:
-            logger.warning({
-                "event": "codex_response_upstream_error",
-                "model": request.model,
-                "size": request.size,
-                "quality": request.quality,
-                "event_count": event_count,
-                "event_types": event_types,
-                "upstream_code": upstream_code,
-                "upstream_error": upstream_error,
-            })
-            raise ImageGenerationError(
-                upstream_error,
-                status_code=502,
-                error_type="server_error",
-                code=upstream_code or "server_error",
-            )
-        if event_type == "response.output_text.delta":
-            delta = str(event.get("delta") or "")
-            if delta:
-                text_parts.append(delta)
-                yield ImageOutput(
-                    kind="progress",
-                    model=request.model,
-                    index=index,
-                    total=total,
-                    text=delta,
-                    upstream_event_type=event_type,
-                )
-            continue
-        images = _codex_response_images(event)
-        if images:
-            logger.info({
-                "event": "codex_response_image_result_found",
-                "model": request.model,
-                "size": request.size,
-                "quality": request.quality,
-                "event_count": event_count,
-                "event_types": event_types,
-                "image_count": len(images),
-                "image_result_lengths": [len(item) for item in images[:10]],
-            })
-            data = format_image_result(
-                [{"b64_json": item, "revised_prompt": request.prompt} for item in images],
-                request.prompt,
-                request.response_format,
-                request.base_url,
-                int(time.time()),
-            )["data"]
-            if data:
-                yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
-                return
-        if event_type:
-            yield ImageOutput(
-                kind="progress",
-                model=request.model,
-                index=index,
-                total=total,
-                upstream_event_type=event_type,
-            )
-    message = "".join(text_parts).strip()
-    if message:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+    images = _codex_response_images(list(backend.iter_codex_image_response_events(
+        prompt=request.prompt,
+        images=request.images or [],
+        size=request.size,
+        quality=request.quality,
+    )))
+    if not images:
+        raise ImageGenerationError("No image result found in response")
+    data = format_image_result(
+        [{"b64_json": item, "revised_prompt": request.prompt} for item in images],
+        request.prompt,
+        request.response_format,
+        request.base_url,
+        int(time.time()),
+    )["data"]
+    if data:
+        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
-    logger.warning({
-        "event": "codex_response_no_image_result",
-        "model": request.model,
-        "size": request.size,
-        "quality": request.quality,
-        "image_input_count": len(request.images or []),
-        "event_count": event_count,
-        "event_types": event_types,
-        "output_text_len": len("".join(text_parts)),
-    })
     raise ImageGenerationError("No image result found in response")
 
 
