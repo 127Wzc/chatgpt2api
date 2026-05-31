@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import time
 from dataclasses import dataclass, field
@@ -193,13 +192,6 @@ def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSON
     return openai_error_response(message, status_code)
 
 
-def _next_item(items):
-    try:
-        return True, next(items)
-    except StopIteration:
-        return False, None
-
-
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -208,6 +200,7 @@ class LoggedCall:
     summary: str
     started: float = field(default_factory=time.time)
     request_text: str = ""
+    request_shape: dict[str, int] | None = None
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
@@ -238,28 +231,8 @@ class LoggedCall:
             "X-Accel-Buffering": "no",
         }
         heartbeat_interval = config.sse_heartbeat_interval_secs
-        try:
-            has_first, first = await run_in_threadpool(_next_item, result)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
-                return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
-        if not has_first:
-            self.log("流式调用结束")
-            return StreamingResponse(
-                sender((), heartbeat_interval=heartbeat_interval),
-                media_type="text/event-stream",
-                headers=stream_headers,
-            )
         return StreamingResponse(
-            sender(self.stream(itertools.chain([first], result)), heartbeat_interval=heartbeat_interval),
+            sender(self.stream(result), heartbeat_interval=heartbeat_interval),
             media_type="text/event-stream",
             headers=stream_headers,
         )
@@ -307,6 +280,8 @@ class LoggedCall:
         request_excerpt = _request_excerpt(self.request_text)
         if request_excerpt:
             detail["request_text"] = request_excerpt
+        if self.request_shape:
+            detail["request_shape"] = self.request_shape
         if error:
             detail["error"] = error
         email = str(account_email or "").strip()
@@ -316,6 +291,6 @@ class LoggedCall:
         if email:
             detail["account_email"] = email
         collected_urls = [*(urls or []), *_collect_urls(result)]
-        if collected_urls:
+        if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)
