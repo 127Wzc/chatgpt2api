@@ -7,7 +7,7 @@ import unittest
 
 from fastapi.responses import StreamingResponse
 
-from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput, stream_image_outputs
+from services.protocol.conversation import ConversationRequest, ImageOutput, stream_image_outputs
 from services.protocol.openai_v1_chat_complete import stream_image_chat_completion
 from services.log_service import LoggedCall
 from utils.helper import sse_json_stream
@@ -137,7 +137,7 @@ class LoggedCallStreamingTests(unittest.TestCase):
         self.assertNotIn("rewritten prompt", content)
         self.assertIn("data:image/png;base64,aGVsbG8=", content)
 
-    def test_image_stream_raises_when_upstream_returns_no_image_result(self):
+    def test_image_stream_returns_message_when_upstream_returns_no_image_result(self):
         class Backend:
             def stream_conversation(self, **kwargs):
                 yield '{"p":"/message/content/parts/0","o":"append","v":"{\\"prompt\\":\\"rewritten prompt\\"}","conversation_id":"conv_test"}'
@@ -146,8 +146,11 @@ class LoggedCallStreamingTests(unittest.TestCase):
             def resolve_conversation_image_urls(self, conversation_id, file_ids, sediment_ids):
                 return []
 
-        with self.assertRaisesRegex(ImageGenerationError, "did not return an image result"):
-            list(stream_image_outputs(Backend(), ConversationRequest(prompt="test", model="gpt-image-2")))
+        outputs = list(stream_image_outputs(Backend(), ConversationRequest(prompt="test", model="gpt-image-2")))
+
+        self.assertEqual(outputs[-1].kind, "message")
+        self.assertIn("rewritten prompt", outputs[-1].text)
+        self.assertEqual(outputs[-1].conversation_id, "conv_test")
 
 
 if __name__ == "__main__":
