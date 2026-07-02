@@ -51,6 +51,9 @@ class AccountService:
         self._lock = Lock()
         self._token_refresh_lock = Lock()
         self._image_slot_condition = Condition(self._lock)
+        self._image_recovery_lock = Lock()
+        self._image_recovery_running = False
+        self._image_recovery_last_started = 0.0
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
@@ -970,12 +973,15 @@ class AccountService:
         max_attempts = 20  # 防止无限循环
         attempted_tokens: set[str] = set()
         for _attempt in range(max_attempts):
-            access_token = self._acquire_next_candidate_token(
-                excluded_tokens=attempted_tokens,
-                plan_type=plan_type,
-                source_type=source_type,
-                plan_types=plan_types,
-            )
+            try:
+                access_token = self._acquire_next_candidate_token(
+                    excluded_tokens=attempted_tokens,
+                    plan_type=plan_type,
+                    source_type=source_type,
+                    plan_types=plan_types,
+                )
+            except RuntimeError:
+                break
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
@@ -995,9 +1001,10 @@ class AccountService:
             ):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
+        self._schedule_image_candidates_refresh(plan_type, source_type, plan_types)
         raise RuntimeError(
-            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
-            if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
+            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)})".replace("  ", " ").strip()
+            if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)})"
         )
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
@@ -1084,6 +1091,73 @@ class AccountService:
                 if item.get("status") == "正常"
                    and (token := item.get("access_token") or "")
             ]
+
+    def _list_image_refresh_candidate_tokens(
+        self,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> list[str]:
+        with self._lock:
+            return [
+                token
+                for item in self._accounts.values()
+                if item.get("status") in {"正常", "限流"}
+                   and self._account_matches_plan_type(item, plan_type)
+                   and self._account_matches_any_plan_type(item, plan_types)
+                   and self._account_matches_source_type(item, source_type)
+                   and (token := item.get("access_token") or "")
+            ]
+
+    def _refresh_image_candidates_once(
+        self,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        tokens = self._list_image_refresh_candidate_tokens(plan_type, source_type, plan_types)
+        if not tokens:
+            return False
+        try:
+            self.refresh_accounts(tokens, defer_invalid_removal=False)
+        except Exception as exc:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "自动刷新图片账号失败",
+                {"source": "get_available_access_token", "count": len(tokens), "error": str(exc or "")[:300]},
+            )
+        else:
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "自动刷新图片账号",
+                {"source": "get_available_access_token", "count": len(tokens)},
+            )
+        return True
+
+    def _schedule_image_candidates_refresh(
+        self,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        now = time.time()
+        with self._image_recovery_lock:
+            if self._image_recovery_running:
+                return False
+            if now - self._image_recovery_last_started < config.image_pool_recovery_cooldown_secs:
+                return False
+            self._image_recovery_running = True
+            self._image_recovery_last_started = now
+
+        def _run() -> None:
+            try:
+                self._refresh_image_candidates_once(plan_type, source_type, plan_types)
+            finally:
+                with self._image_recovery_lock:
+                    self._image_recovery_running = False
+
+        Thread(target=_run, name="image-pool-recovery", daemon=True).start()
+        return True
 
     @staticmethod
     def _account_payload_token(item: dict) -> str:

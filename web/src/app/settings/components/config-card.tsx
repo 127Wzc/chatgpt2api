@@ -23,6 +23,7 @@ export function ConfigCard() {
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
+  const setImagePoolRecoveryCooldownSecs = useSettingsStore((state) => state.setImagePoolRecoveryCooldownSecs);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
@@ -135,6 +136,16 @@ export function ConfigCard() {
                 测试代理
               </Button>
             </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片号池恢复冷却</label>
+            <Input
+              value={String(config?.image_pool_recovery_cooldown_secs || "")}
+              onChange={(event) => setImagePoolRecoveryCooldownSecs(event.target.value)}
+              placeholder="10"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。连续报图片额度不足时，后台自动刷新账号状态的最小触发间隔。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">图片访问地址</label>

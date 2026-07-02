@@ -97,6 +97,23 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(plus_token, "token-plus")
             self.assertEqual(pro_token, "token-pro")
 
+    def test_get_available_access_token_triggers_background_refresh_for_stale_image_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([{"access_token": "token-1", "type": "Plus", "status": "限流", "quota": 0}])
+
+            scheduled: list[tuple[str | None, str | None, tuple[str, ...] | None]] = []
+
+            def fake_schedule(plan_type=None, source_type=None, plan_types=None):
+                scheduled.append((plan_type, source_type, tuple(plan_types) if plan_types else None))
+                return True
+
+            service._schedule_image_candidates_refresh = fake_schedule
+
+            with self.assertRaisesRegex(RuntimeError, "no available plus image quota"):
+                service.get_available_access_token(plan_type="plus")
+            self.assertEqual(scheduled, [("plus", None, None)])
+
     def test_refresh_accounts_can_remove_invalid_token_without_confirmation_delay(self) -> None:
         original_value = config.data.get("auto_remove_invalid_accounts")
         config.data["auto_remove_invalid_accounts"] = True
