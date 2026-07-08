@@ -49,6 +49,14 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
     "drop_assistant_history": False,
 }
 
+DEFAULT_IMAGE_BACKEND_MODEL_SLUG = "gpt-5-5-thinking"
+IMAGE_BACKEND_MODEL_SLUG_OPTIONS = {
+    "gpt-5-5-thinking",
+    "gpt-5-5",
+    "gpt-5-3",
+    "auto",
+}
+
 DEFAULT_PROXY_RUNTIME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -103,6 +111,13 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (OverflowError, TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_image_backend_model_slug(value: object) -> str:
+    slug = str(value or "").strip().lower()
+    if slug in IMAGE_BACKEND_MODEL_SLUG_OPTIONS:
+        return slug
+    return DEFAULT_IMAGE_BACKEND_MODEL_SLUG
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -439,6 +454,19 @@ class ConfigStore:
             return 3
 
     @property
+    def image_backend_model_slug(self) -> str:
+        return _normalize_image_backend_model_slug(
+            self.data.get("image_backend_model_slug", DEFAULT_IMAGE_BACKEND_MODEL_SLUG)
+        )
+
+    @property
+    def image_backend_fallback_enabled(self) -> bool:
+        value = self.data.get("image_backend_fallback_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -572,6 +600,8 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_backend_model_slug"] = self.image_backend_model_slug
+        data["image_backend_fallback_enabled"] = self.image_backend_fallback_enabled
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
@@ -613,6 +643,15 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        if "image_backend_model_slug" in next_data:
+            next_data["image_backend_model_slug"] = _normalize_image_backend_model_slug(
+                next_data.get("image_backend_model_slug")
+            )
+        if "image_backend_fallback_enabled" in next_data:
+            next_data["image_backend_fallback_enabled"] = _normalize_bool(
+                next_data.get("image_backend_fallback_enabled"),
+                True,
+            )
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

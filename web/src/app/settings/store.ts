@@ -178,6 +178,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    image_backend_model_slug: String(config.image_backend_model_slug || "gpt-5-5-thinking"),
+    image_backend_fallback_enabled: Boolean(config.image_backend_fallback_enabled !== false),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
     image_remove_conversation_after_result: Boolean(config.image_remove_conversation_after_result),
@@ -304,6 +306,8 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setImageBackendModelSlug: (value: string) => void;
+  setImageBackendFallbackEnabled: (value: boolean) => void;
   setImageSettleEnabled: (value: boolean) => void;
   setImageCheckBeforeHitEnabled: (value: boolean) => void;
   setImageRemoveConversationAfterResult: (value: boolean) => void;
@@ -453,6 +457,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        image_backend_model_slug: String(config.image_backend_model_slug || "gpt-5-5-thinking").trim() || "gpt-5-5-thinking",
+        image_backend_fallback_enabled: Boolean(config.image_backend_fallback_enabled !== false),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
         image_remove_conversation_after_result: Boolean(config.image_remove_conversation_after_result),
@@ -561,6 +567,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountConcurrency: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
+  },
+
+  setImageBackendModelSlug: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_backend_model_slug: value } } : {});
+  },
+
+  setImageBackendFallbackEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_backend_fallback_enabled: value } } : {});
   },
 
   setImageSettleEnabled: (value) => {

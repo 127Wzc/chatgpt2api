@@ -156,6 +156,8 @@ export type SettingsConfig = {
   base_url?: string;
   global_system_prompt?: string;
   sensitive_words?: string[];
+  image_backend_model_slug?: string;
+  image_backend_fallback_enabled?: boolean;
   ai_review?: {
     enabled?: boolean;
     base_url?: string;

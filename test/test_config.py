@@ -58,6 +58,32 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_image_backend_model_settings_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+
+            module = self.config_module
+            store = module.ConfigStore(config_path)
+
+            updated = store.update({
+                "image_backend_model_slug": "gpt-5-3",
+                "image_backend_fallback_enabled": "off",
+            })
+            self.assertEqual(store.image_backend_model_slug, "gpt-5-3")
+            self.assertFalse(store.image_backend_fallback_enabled)
+            self.assertEqual(updated["image_backend_model_slug"], "gpt-5-3")
+            self.assertFalse(updated["image_backend_fallback_enabled"])
+
+            updated = store.update({
+                "image_backend_model_slug": "not-a-real-model",
+                "image_backend_fallback_enabled": "on",
+            })
+            self.assertEqual(store.image_backend_model_slug, "gpt-5-5-thinking")
+            self.assertTrue(store.image_backend_fallback_enabled)
+            self.assertEqual(updated["image_backend_model_slug"], "gpt-5-5-thinking")
+            self.assertTrue(updated["image_backend_fallback_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

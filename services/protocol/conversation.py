@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator
 
 import tiktoken
@@ -331,6 +331,7 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    image_model_slug_override: str = ""
 
 
 @dataclass
@@ -682,6 +683,7 @@ def conversation_events(
     size: str | None = None,
     quality: str = "auto",
     thinking_effort: str = "",
+    image_model_slug_override: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -695,6 +697,7 @@ def conversation_events(
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
         thinking_effort=thinking_effort if not image_model else "",
+        image_model_slug_override=image_model_slug_override if image_model else "",
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -832,6 +835,7 @@ def stream_image_outputs(
             images=request.images or [],
             size=request.size,
             quality=request.quality,
+            image_model_slug_override=request.image_model_slug_override,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -1298,13 +1302,40 @@ def _generate_single_image(
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
     account_email = ""
+    backend_slug_candidates = OpenAIBackendAPI.image_model_slug_candidates(request.model)
+    backend_slug_index = 0
+
+    def _current_backend_slug() -> str:
+        if not backend_slug_candidates:
+            return ""
+        index_value = min(backend_slug_index, len(backend_slug_candidates) - 1)
+        return backend_slug_candidates[index_value]
+
+    def _try_advance_backend_slug(reason: str, error: str = "") -> bool:
+        nonlocal backend_slug_index
+        if backend_slug_index >= len(backend_slug_candidates) - 1:
+            return False
+        previous_slug = _current_backend_slug()
+        backend_slug_index += 1
+        next_slug = _current_backend_slug()
+        logger.warning({
+            "event": "image_backend_model_fallback",
+            "public_model": request.model,
+            "from_backend_model_slug": previous_slug,
+            "to_backend_model_slug": next_slug,
+            "reason": reason,
+            "error": error[:300],
+            "index": index,
+        })
+        return True
 
     while True:
+        active_request = replace(request, image_model_slug_override=_current_backend_slug())
         try:
-            if request.progress_callback:
-                request.progress_callback("getting_account")
-            plan_type, _ = split_image_model(request.model)
-            codex_model = is_codex_image_model(request.model)
+            if active_request.progress_callback:
+                active_request.progress_callback("getting_account")
+            plan_type, _ = split_image_model(active_request.model)
+            codex_model = is_codex_image_model(active_request.model)
             token = account_service.get_available_access_token(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
@@ -1328,14 +1359,14 @@ def _generate_single_image(
         backend = None
         try:
             backend = OpenAIBackendAPI(access_token=token)
-            if request.progress_callback:
-                backend.progress_callback = request.progress_callback
-            stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
+            if active_request.progress_callback:
+                backend.progress_callback = active_request.progress_callback
+            stream_fn = stream_codex_image_outputs if is_codex_image_model(active_request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
-            for output in stream_fn(backend, request, index, total):
+            for output in stream_fn(backend, active_request, index, total):
                 if account_email and not output.account_email:
                     output.account_email = account_email
-                if output.kind == "message" and request.message_as_error:
+                if output.kind == "message" and active_request.message_as_error:
                     raise ImageGenerationError(
                         output.text or "Image generation was rejected by upstream policy.",
                         status_code=400,
@@ -1350,6 +1381,15 @@ def _generate_single_image(
                 outputs.append(output)
             if returned_message:
                 account_service.mark_image_result(token, False)
+                message_text = ""
+                for item in outputs:
+                    if item.kind == "message":
+                        message_text = item.text or ""
+                        break
+                lower_message = message_text.lower()
+                looks_like_policy = any(keyword in lower_message for keyword in ("policy", "moderation", "违规", "拒绝", "safety"))
+                if not active_request.message_as_error and not looks_like_policy and _try_advance_backend_slug("message_reply", message_text):
+                    continue
                 return outputs
             if not returned_result:
                 account_service.mark_image_result(token, False)
@@ -1370,6 +1410,8 @@ def _generate_single_image(
             account_service.mark_image_result(token, False)
             if account_email:
                 setattr(exc, "account_email", account_email)
+            if _try_advance_backend_slug("poll_timeout", str(exc)):
+                continue
             # 轮询超时：换账号重试
             if not emitted_for_token:
                 poll_timeout_retry_count += 1
@@ -1416,6 +1458,8 @@ def _generate_single_image(
             error_text = str(exc)
             # 如果是模型返回文本而非图片，尝试换账号重试
             if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
+                if _try_advance_backend_slug("text_reply", error_text):
+                    continue
                 text_reply_retry_count += 1
                 if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
                     logger.warning({
@@ -1450,6 +1494,8 @@ def _generate_single_image(
                 "error": error_text,
                 "index": index,
             })
+            if getattr(exc, "code", "") == "no_image_generated" and _try_advance_backend_slug("no_image_generated", error_text):
+                continue
             raise
         except Exception as exc:
             account_service.mark_image_result(token, False)

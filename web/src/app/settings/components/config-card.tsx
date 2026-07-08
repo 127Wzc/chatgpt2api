@@ -19,6 +19,12 @@ export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
   const logLevelOptions = ["debug", "info", "warning", "error"];
+  const imageBackendModelOptions = [
+    { value: "gpt-5-5-thinking", label: "推荐：gpt-5-5-thinking" },
+    { value: "gpt-5-5", label: "新版：gpt-5-5" },
+    { value: "gpt-5-3", label: "旧版：gpt-5-3" },
+    { value: "auto", label: "自动：auto" },
+  ];
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
@@ -27,6 +33,8 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageBackendModelSlug = useSettingsStore((state) => state.setImageBackendModelSlug);
+  const setImageBackendFallbackEnabled = useSettingsStore((state) => state.setImageBackendFallbackEnabled);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
   const setImageRemoveConversationAfterResult = useSettingsStore((state) => state.setImageRemoveConversationAfterResult);
   const setImageSettleSecs = useSettingsStore((state) => state.setImageSettleSecs);
@@ -186,6 +194,35 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">生图底层模型</label>
+            <Select
+              value={String(config?.image_backend_model_slug || "gpt-5-5-thinking")}
+              onValueChange={setImageBackendModelSlug}
+            >
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white shadow-none">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {imageBackendModelOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-stone-500">`gpt-image-2` 会继续对外保持不变，但底层会改走这里选定的 ChatGPT Web 内部模型 slug。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+              <Checkbox
+                checked={Boolean(config?.image_backend_fallback_enabled !== false)}
+                onCheckedChange={(checked) => setImageBackendFallbackEnabled(Boolean(checked))}
+              />
+              生图失败后轮询备用模型
+            </label>
+            <p className="text-xs text-stone-500">先用上面的模型；遇到无图、超时或该模型不可用时，再尝试备用模型链。</p>
           </div>
           <div className="space-y-2">
             <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">

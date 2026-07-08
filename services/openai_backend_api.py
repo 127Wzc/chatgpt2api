@@ -56,6 +56,7 @@ DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_RESPONSES_MODEL = "gpt-5.5"
+IMAGE_BACKEND_MODEL_FALLBACK_ORDER = ("gpt-5-5-thinking", "gpt-5-5", "gpt-5-3", "auto")
 SEARCH_MODEL = "gpt-5-5"
 SEARCH_TIMEOUT_SECS = 300.0
 SEARCH_POLL_INTERVAL_SECS = 3.0
@@ -547,16 +548,32 @@ class OpenAIBackendAPI:
             payload["thinking_effort"] = normalized_effort
         return payload
 
-    def _image_model_slug(self, model: str) -> str:
-        """把标准图片模型名映射到底层 model slug。"""
+    @staticmethod
+    def _normalize_image_backend_slug(value: str) -> str:
+        slug = str(value or "").strip().lower()
+        return slug if slug in IMAGE_BACKEND_MODEL_FALLBACK_ORDER else "auto"
+
+    @classmethod
+    def image_model_slug_candidates(cls, model: str, preferred_slug: str = "") -> list[str]:
+        """Return internal ChatGPT Web model slugs for a public image model."""
         _, base_model = split_image_model(model)
         if not base_model:
-            return "auto"
+            return ["auto"]
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            primary = cls._normalize_image_backend_slug(preferred_slug or config.image_backend_model_slug)
+            candidates = [primary]
+            if config.image_backend_fallback_enabled:
+                for slug in IMAGE_BACKEND_MODEL_FALLBACK_ORDER:
+                    if slug not in candidates:
+                        candidates.append(slug)
+            return candidates
         if base_model == CODEX_IMAGE_MODEL:
-            return base_model
-        return "auto"
+            return [base_model]
+        return ["auto"]
+
+    def _image_model_slug(self, model: str, preferred_slug: str = "") -> str:
+        """把标准图片模型名映射到底层 model slug。"""
+        return self.image_model_slug_candidates(model, preferred_slug)[0]
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
@@ -842,14 +859,21 @@ class OpenAIBackendAPI:
             retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
-    def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
+    def _prepare_image_conversation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            model: str,
+            image_model_slug_override: str = "",
+    ) -> str:
         """为图片生成准备 conduit token。"""
+        image_model_slug = self._image_model_slug(model, image_model_slug_override)
         path = "/backend-api/f/conversation/prepare"
         payload = {
             "action": "next",
             "fork_from_shared_post": False,
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": image_model_slug,
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -947,10 +971,18 @@ class OpenAIBackendAPI:
             "height": height,
         }
 
-    def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
-                                references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
+    def _start_image_generation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            conduit_token: str,
+            model: str,
+            references: Optional[list[Dict[str, Any]]] = None,
+            image_model_slug_override: str = "",
+    ) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         references = references or []
+        image_model_slug = self._image_model_slug(model, image_model_slug_override)
         parts = [{
             "content_type": "image_asset_pointer",
             "asset_pointer": f"file-service://{item['file_id']}",
@@ -987,7 +1019,7 @@ class OpenAIBackendAPI:
                 "metadata": metadata,
             }],
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": image_model_slug,
             "client_prepare_state": "sent",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -2538,10 +2570,11 @@ class OpenAIBackendAPI:
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
+            image_model_slug_override: str = "",
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
-            yield from self._stream_picture_conversation(prompt, model, images or [])
+            yield from self._stream_picture_conversation(prompt, model, images or [], image_model_slug_override)
             return
 
         normalized = messages or [{"role": "user", "content": prompt}]
@@ -2575,9 +2608,18 @@ class OpenAIBackendAPI:
             prompt: str,
             model: str,
             images: list[str],
+            image_model_slug_override: str = "",
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
+        selected_slug = self._image_model_slug(model, image_model_slug_override)
+        logger.info({
+            "event": "image_backend_model_selected",
+            "public_model": model,
+            "backend_model_slug": selected_slug,
+            "fallback_enabled": bool(config.image_backend_fallback_enabled),
+            "configured_backend_model_slug": str(config.image_backend_model_slug),
+        })
         self._report_progress("uploading")
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
@@ -2585,9 +2627,16 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        conduit_token = self._prepare_image_conversation(prompt, requirements, model, image_model_slug_override)
         self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        response = self._start_image_generation(
+            prompt,
+            requirements,
+            conduit_token,
+            model,
+            references,
+            image_model_slug_override,
+        )
         self._report_progress("generating")
         try:
             yield from iter_sse_payloads(response)
