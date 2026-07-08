@@ -1,14 +1,20 @@
-"""OpenAI Sentinel Token (PoW) 生成与请求工具函数。
+"""OpenAI Sentinel token helpers.
 
-用于密码登录、注册等需要 sentinel token 的流程。
+- 旧接口：保留密码登录等仍在使用的 legacy sentinel token 逻辑。
+- 新接口：注册 create_account 阶段改为先拿 live sentinel requirements，
+  再调用官方 SDK 生成最终的 Sentinel token / SO token。
 """
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import json
 import random
+import shutil
+import subprocess
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -91,6 +97,155 @@ DEFAULT_SENTINEL_USER_AGENT = (
     "Chrome/145.0.0.0 Safari/537.36"
 )
 DEFAULT_SENTINEL_SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"'
+DEFAULT_SENTINEL_BOOTSTRAP_URL = "https://sentinel.openai.com/backend-api/sentinel/sdk.js"
+DEFAULT_SENTINEL_REQ_URL = "https://sentinel.openai.com/backend-api/sentinel/req"
+DEFAULT_SENTINEL_FRAME_REFERER = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
+DEFAULT_SO_OBSERVER_WAIT_MS = 5000
+
+
+@dataclass
+class OfficialSentinelResult:
+    token: str
+    so_token: str
+    sdk_url: str = ""
+    sdk_version: str = ""
+    bootstrap_url: str = DEFAULT_SENTINEL_BOOTSTRAP_URL
+    token_length: int = 0
+    so_token_length: int = 0
+    so_generated: bool = False
+    requirements: dict | None = None
+
+
+def fetch_sentinel_requirements(
+    session: "Session",
+    device_id: str,
+    flow: str,
+    *,
+    user_agent: str = "",
+    sec_ch_ua: str = "",
+) -> dict:
+    """Fetch live sentinel requirements for a flow.
+
+    注册 create_account 阶段的 requirements 由 live req 接口提供，其中包含：
+    - token
+    - proofofwork
+    - turnstile
+    - so
+    """
+    ua = user_agent or DEFAULT_SENTINEL_USER_AGENT
+    ch_ua = sec_ch_ua or DEFAULT_SENTINEL_SEC_CH_UA
+    response = session.post(
+        DEFAULT_SENTINEL_REQ_URL,
+        data=json.dumps({"id": device_id, "flow": flow}, separators=(",", ":")),
+        headers={
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Referer": DEFAULT_SENTINEL_FRAME_REFERER,
+            "Origin": "https://sentinel.openai.com",
+            "User-Agent": ua,
+            "sec-ch-ua": ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        },
+        timeout=20,
+        verify=False,
+    )
+    try:
+        data = response.json() if response.text else {}
+    except Exception as exc:
+        raise RuntimeError(f"sentinel_req_invalid_json_{response.status_code}") from exc
+    if response.status_code != 200 or not isinstance(data, dict) or not str(data.get("token") or "").strip():
+        raise RuntimeError(f"sentinel_req_failed_{response.status_code}")
+    return data
+
+
+def _sentinel_runner_script() -> Path:
+    return Path(__file__).resolve().parents[1] / "scripts" / "sentinel_sdk_runner.mjs"
+
+
+def _run_official_sentinel_sdk(
+    *,
+    device_id: str,
+    flow: str,
+    requirements: dict,
+    user_agent: str = "",
+    observer_wait_ms: int = DEFAULT_SO_OBSERVER_WAIT_MS,
+) -> OfficialSentinelResult:
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("sentinel_sdk_node_missing")
+    script = _sentinel_runner_script()
+    if not script.exists():
+        raise RuntimeError(f"sentinel_sdk_runner_missing:{script}")
+    payload = {
+        "deviceId": device_id,
+        "flow": flow,
+        "requirements": requirements,
+        "observerWaitMs": max(0, int(observer_wait_ms or DEFAULT_SO_OBSERVER_WAIT_MS)),
+        "bootstrapUrl": DEFAULT_SENTINEL_BOOTSTRAP_URL,
+        "userAgent": user_agent or DEFAULT_SENTINEL_USER_AGENT,
+    }
+    try:
+        completed = subprocess.run(
+            [node, str(script)],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=max(20, 15 + int(observer_wait_ms / 1000) + 15),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("sentinel_sdk_timeout") from exc
+    stderr = str(completed.stderr or "").strip()
+    stdout = str(completed.stdout or "").strip()
+    if completed.returncode != 0:
+        detail = stderr or stdout or f"exit_{completed.returncode}"
+        raise RuntimeError(f"sentinel_sdk_failed:{detail[:500]}")
+    try:
+        data = json.loads(stdout)
+    except Exception as exc:
+        raise RuntimeError(f"sentinel_sdk_invalid_output:{stdout[:300]}") from exc
+    token = str(data.get("token") or "").strip()
+    if not token:
+        raise RuntimeError("sentinel_sdk_missing_token")
+    so_token = str(data.get("so_token") or "").strip()
+    return OfficialSentinelResult(
+        token=token,
+        so_token=so_token,
+        sdk_url=str(data.get("sdk_url") or ""),
+        sdk_version=str(data.get("sdk_version") or ""),
+        bootstrap_url=str(data.get("bootstrap_url") or DEFAULT_SENTINEL_BOOTSTRAP_URL),
+        token_length=int(data.get("token_length") or len(token)),
+        so_token_length=int(data.get("so_token_length") or len(so_token)),
+        so_generated=bool(data.get("so_generated")),
+        requirements=requirements,
+    )
+
+
+def build_official_sentinel_result(
+    session: "Session",
+    device_id: str,
+    flow: str,
+    *,
+    user_agent: str = "",
+    sec_ch_ua: str = "",
+    observer_wait_ms: int = DEFAULT_SO_OBSERVER_WAIT_MS,
+) -> OfficialSentinelResult:
+    requirements = fetch_sentinel_requirements(
+        session,
+        device_id,
+        flow,
+        user_agent=user_agent,
+        sec_ch_ua=sec_ch_ua,
+    )
+    result = _run_official_sentinel_sdk(
+        device_id=device_id,
+        flow=flow,
+        requirements=requirements,
+        user_agent=user_agent,
+        observer_wait_ms=observer_wait_ms,
+    )
+    result.requirements = requirements
+    return result
 
 
 def build_sentinel_token(

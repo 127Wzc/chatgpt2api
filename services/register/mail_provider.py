@@ -21,6 +21,8 @@ from services.config import DATA_DIR
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
 _ddg_aliases_lock = Lock()
+REGISTER_SUCCESS_STATS_FILE = DATA_DIR / "register_success_stats.json"
+_register_success_stats_lock = Lock()
 
 OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
 _outlook_token_state_lock = Lock()
@@ -96,6 +98,53 @@ def _load_outlook_token_state() -> dict[str, dict[str, Any]]:
             else:
                 state[email] = {"state": str(value or "used").strip() or "used", "reason": "", "updated_at": ""}
     return state
+
+
+def _load_register_success_stats() -> dict[str, Any]:
+    try:
+        if REGISTER_SUCCESS_STATS_FILE.exists():
+            data = json.loads(REGISTER_SUCCESS_STATS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"providers": {}, "domains": {}}
+
+
+def _save_register_success_stats(data: dict[str, Any]) -> None:
+    REGISTER_SUCCESS_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REGISTER_SUCCESS_STATS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _update_success_bucket(bucket: dict[str, Any], *, success: bool, error: str = "") -> None:
+    bucket["success"] = int(bucket.get("success") or 0) + (1 if success else 0)
+    bucket["fail"] = int(bucket.get("fail") or 0) + (0 if success else 1)
+    bucket["last_result"] = "success" if success else "fail"
+    bucket["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+    if error:
+        bucket["last_error"] = error[:300]
+
+
+def record_register_success_stats(mailbox: dict[str, Any], *, success: bool, error: Exception | str | None = None) -> None:
+    address = str(mailbox.get("address") or "").strip().lower()
+    provider = str(mailbox.get("provider") or "").strip()
+    provider_ref = str(mailbox.get("provider_ref") or "").strip()
+    if not address and not provider:
+        return
+    provider_key = "#".join(part for part in (provider, provider_ref) if part)
+    domain = address.partition("@")[2].strip()
+    reason = str(error or "").strip()
+    with _register_success_stats_lock:
+        data = _load_register_success_stats()
+        providers = data.setdefault("providers", {})
+        domains = data.setdefault("domains", {})
+        if provider_key:
+            entry = providers.setdefault(provider_key, {"provider": provider, "provider_ref": provider_ref, "success": 0, "fail": 0})
+            _update_success_bucket(entry, success=success, error=reason)
+        if domain:
+            entry = domains.setdefault(domain, {"domain": domain, "success": 0, "fail": 0})
+            _update_success_bucket(entry, success=success, error=reason)
+        _save_register_success_stats(data)
 
 
 def _save_outlook_token_state(state: dict[str, dict[str, Any]]) -> None:
@@ -1523,6 +1572,7 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
     """
+    record_register_success_stats(mailbox, success=success, error=error)
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
     address = str(mailbox.get("address") or "").strip()
