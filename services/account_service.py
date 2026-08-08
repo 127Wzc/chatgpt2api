@@ -608,7 +608,7 @@ class AccountService:
             device_id = str(uuid.uuid4())
             
             # ─── 方式2: OAuth authorize 流程 ──────────────────────────
-            # 使用 Platform Client + PKCE（与注册流程相同）
+            # 使用 Platform Client + PKCE
             
             from utils.pkce import generate_pkce
             code_verifier, code_challenge = generate_pkce()
@@ -748,7 +748,7 @@ class AccountService:
                 else:
                     return {"ok": False, "error": "no_auth_code", "detail": login_data}
             
-            # ④ 用 code 换 token (使用 Platform Client + code_verifier，与注册流程相同)
+            # ④ 用 code 换 token (使用 Platform Client + code_verifier)
             platform_base = "https://platform.openai.com"
             token_resp = session.post(
                 f"{auth_base}/api/accounts/oauth/token",
@@ -1004,18 +1004,38 @@ class AccountService:
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)})"
         )
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_text_access_token(
+            self,
+            excluded_tokens: set[str] | None = None,
+            model: str = "auto",
+    ) -> str:
         excluded = set(excluded_tokens or set())
+        requested_model = str(model or "auto").strip() or "auto"
+        route = None
+        if requested_model != "auto":
+            from services.model_service import model_catalog_service
+
+            route = model_catalog_service.route_for_model(requested_model)
         with self._lock:
             candidates = [
                 token
                 for account in self._accounts.values()
                 if account.get("status") not in {"禁用", "异常"}
+                   and (
+                       route is None
+                       or self._normalize_account_type(account.get("type")) in route.account_types
+                   )
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
             if not candidates:
-                return ""
+                if route is None or route.allow_anonymous:
+                    return ""
+                from services.model_service import ModelUnavailableError
+
+                raise ModelUnavailableError(
+                    f"model {requested_model!r} is not available to any active account"
+                )
             access_token = candidates[self._index % len(candidates)]
             self._index += 1
         return self.refresh_access_token(access_token, event="get_text_access_token") or access_token
